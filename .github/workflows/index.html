@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Bot Manager — Anti-Nuke</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;background:#0f1724;color:#e6eef8;padding:24px}
+  .card{max-width:900px;margin:12px auto;padding:18px;border-radius:10px;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.06));box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+  h1{margin:0 0 8px 0;font-size:22px;color:#cfe8ff}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  button{padding:8px 12px;border-radius:8px;border:none;cursor:pointer}
+  .btn-add{background:#2563eb;color:white}
+  .btn-manage{background:#10b981;color:white}
+  .btn-login{background:#5865f2;color:white;padding:10px 16px;border-radius:10px}
+  .servers{margin-top:12px}
+  .server{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,0.02);margin-top:8px}
+  pre{background:#081226;padding:10px;border-radius:8px;overflow:auto;color:#bfefff}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Bot Manager — Anti-Nuke</h1>
+    <div id="authArea">
+      <button id="loginBtn" class="btn-login">Login with Discord</button>
+      <span id="userInfo"></span>
+    </div>
+    <div style="margin-top:14px">
+      <strong>Bot Invite</strong> — click to invite the bot to a server (needs Manage Server permission):
+      <div><code id="inviteUrl"></code></div>
+    </div>
+
+    <div class="servers" id="servers"></div>
+
+    <div style="margin-top:16px">
+      <strong>Selected Server Logs</strong>
+      <div id="selectedServerName">None</div>
+      <pre id="logs">Log will appear here</pre>
+      <div style="margin-top:8px">
+        <button id="activateBtn" class="btn-manage">Activate Anti-Nuke</button>
+        <button id="deactivateBtn" class="btn-manage" style="background:#ef4444">Deactivate Anti-Nuke</button>
+      </div>
+    </div>
+    <div style="margin-top:14px;color:#9fb3cf;font-size:13px">Note: You can invite the bot to a server via the "Add Bot" button. If the bot is already in the server, you'll see "Manage" instead. Logs are fetched from the bot's API (must be running).</div>
+  </div>
+
+<script>
+// ====== CONFIG - customize these values before hosting ======
+const BOT_API_BASE = 'http://fi6.bot-hosting.net:20087'; // bot API base (must match bot host & port)
+const BOT_CLIENT_ID = 'YOUR_BOT_CLIENT_ID';              // the bot's application client id (for invite URL)
+const AUTH_KEY = 'supersecretkey123';                   // shared secret between frontend and bot API
+const REDIRECT_URI = location.origin + location.pathname; // where Discord redirects after oauth
+const DISCORD_CLIENT_ID = 'YOUR_DISCORD_OAUTH_CLIENT_ID'; // client id for OAuth (can be same as bot app id)
+// ==========================================================
+
+// Invite URL generator (bot invite with permissions; change permissions integer as needed)
+function inviteUrlForGuild() {
+  const perms = 8; // administrator (careful) — change to less if you want specific perms
+  return `https://discord.com/oauth2/authorize?client_id=${BOT_CLIENT_ID}&permissions=${perms}&scope=bot%20applications.commands`;
+}
+document.getElementById('inviteUrl').textContent = inviteUrlForGuild();
+
+// OAuth2 implicit login
+const loginBtn = document.getElementById('loginBtn');
+loginBtn.onclick = () => {
+  const scopes = encodeURIComponent('identify guilds');
+  const url = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=token&scope=${scopes}`;
+  location.href = url;
+};
+
+let accessToken = null;
+let userGuilds = [];
+let botGuilds = []; // guilds where bot is present (fetched from bot API)
+let selectedGuild = null;
+
+// Parse token from URL hash (implicit grant)
+function parseHash() {
+  if(!location.hash) return;
+  const params = new URLSearchParams(location.hash.substring(1));
+  if(params.get('access_token')) {
+    accessToken = params.get('access_token');
+    // remove hash from url for cleanliness
+    history.replaceState({}, document.title, location.pathname + location.search);
+    fetchUserAndGuilds();
+  }
+}
+
+// Fetch user info and their guilds via Discord API
+async function fetchUserAndGuilds() {
+  if(!accessToken) return;
+  const meRes = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: 'Bearer ' + accessToken } });
+  const me = await meRes.json();
+  document.getElementById('userInfo').textContent = `Logged in as ${me.username}#${me.discriminator}`;
+  const guildRes = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: 'Bearer ' + accessToken } });
+  userGuilds = await guildRes.json();
+  renderGuildList();
+  // fetch bot guilds
+  fetchBotGuilds();
+}
+
+async function fetchBotGuilds(){
+  try{
+    const res = await fetch(`${BOT_API_BASE}/api/bot/guilds`);
+    const j = await res.json();
+    botGuilds = j.guilds || [];
+    renderGuildList();
+  }catch(e){
+    console.warn("Failed to fetch bot guilds:", e);
+  }
+}
+
+function renderGuildList(){
+  const container = document.getElementById('servers');
+  container.innerHTML = '<h3>Your Servers</h3>';
+  userGuilds.forEach(g => {
+    const isBotIn = botGuilds.find(b=>String(b.id)===String(g.id));
+    const el = document.createElement('div');
+    el.className = 'server';
+    el.innerHTML = `<div>${g.name} <small>(${g.id})</small></div>`;
+    const actions = document.createElement('div');
+    if(isBotIn){
+      const manageBtn = document.createElement('button');
+      manageBtn.className = 'btn-manage';
+      manageBtn.textContent = 'Manage';
+      manageBtn.onclick = ()=>selectGuild(g);
+      actions.appendChild(manageBtn);
+    } else {
+      const addBtn = document.createElement('button');
+      addBtn.className = 'btn-add';
+      addBtn.textContent = 'Add Bot';
+      addBtn.onclick = ()=>{
+        window.open(`https://discord.com/oauth2/authorize?client_id=${BOT_CLIENT_ID}&permissions=8&scope=bot%20applications.commands&guild_id=${g.id}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`,'_blank');
+      };
+      actions.appendChild(addBtn);
+    }
+    el.appendChild(actions);
+    container.appendChild(el);
+  });
+}
+
+// Select a guild to show logs & manage
+async function selectGuild(g){
+  selectedGuild = g;
+  document.getElementById('selectedServerName').textContent = `${g.name} (${g.id})`;
+  // fetch logs from bot API (requires AUTH_KEY)
+  try{
+    const res = await fetch(`${BOT_API_BASE}/api/logs?auth=${AUTH_KEY}&guild_id=${g.id}`);
+    const j = await res.json();
+    if(j.ok){
+      document.getElementById('logs').textContent = j.logs.map(x=>`${x.timestamp} — ${x.event} — ${x.detail}`).join('\\n') || 'No logs';
+    }else{
+      document.getElementById('logs').textContent = 'Error fetching logs: ' + JSON.stringify(j);
+    }
+  }catch(e){
+    document.getElementById('logs').textContent = 'Failed to fetch logs: ' + e;
+  }
+}
+
+// Activate / deactivate buttons
+document.getElementById('activateBtn').onclick = ()=> {
+  if(!selectedGuild){ alert('Select a server first'); return; }
+  apiCommand('activate-antinuke', selectedGuild.id);
+};
+document.getElementById('deactivateBtn').onclick = ()=> {
+  if(!selectedGuild){ alert('Select a server first'); return; }
+  apiCommand('deactivate-antinuke', selectedGuild.id);
+};
+
+async function apiCommand(command, guildId){
+  try{
+    const res = await fetch(`${BOT_API_BASE}/api/command`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ auth: AUTH_KEY, command: command, guild_id: guildId })
+    });
+    const j = await res.json();
+    if(j.ok){
+      alert('Command sent');
+      // refresh logs
+      selectGuild(selectedGuild);
+    }else{
+      alert('Error: ' + JSON.stringify(j));
+    }
+  }catch(e){
+    alert('Failed to send command: ' + e);
+  }
+}
+
+parseHash();
+</script>
+</body>
+</html>
